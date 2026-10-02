@@ -1,56 +1,48 @@
-terraform {
-  required_version = ">= 1.10"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 6.0"
-    }
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  tags                 = { Name = "${var.project_name}-vpc" }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.project_name}-igw" }
+}
+
+resource "aws_subnet" "public" {
+  count                   = length(var.public_subnet_cidrs)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+  tags                    = { Name = "${var.project_name}-public-${count.index + 1}" }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
   }
+
+  tags = { Name = "${var.project_name}-public-rt" }
 }
 
-provider "aws" {
-  region = var.region
+resource "aws_route_table_association" "public" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
 }
 
-variable "region" {
-  type    = string
-  default = "us-east-1"
-}
-
-data "aws_caller_identity" "current" {}
-
-resource "aws_s3_bucket" "state" {
-  bucket = "tfstate-${data.aws_caller_identity.current.account_id}-${var.region}"
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "aws_s3_bucket_versioning" "state" {
-  bucket = aws_s3_bucket.state.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
-  bucket = aws_s3_bucket.state.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "state" {
-  bucket                  = aws_s3_bucket.state.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-output "state_bucket" {
-  value = aws_s3_bucket.state.bucket
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.public.id]
+  tags              = { Name = "${var.project_name}-s3-endpoint" }
 }
